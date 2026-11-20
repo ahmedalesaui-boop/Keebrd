@@ -1,0 +1,304 @@
+name: Build APK
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+      - name: Create project
+        run: |
+          mkdir -p P
+          cat > P/settings.gradle << 'EOF_FILE'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "NokiaStyleKeyboard"
+          include(":app")
+          EOF_FILE
+          cat > P/build.gradle << 'EOF_FILE'
+          plugins {
+              id 'com.android.application' version '8.6.1' apply false
+              id 'org.jetbrains.kotlin.android' version '2.0.21' apply false
+          }
+          EOF_FILE
+          cat > P/gradle.properties << 'EOF_FILE'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          EOF_FILE
+          mkdir -p P/app
+          cat > P/app/build.gradle << 'EOF_FILE'
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+          android {
+              namespace 'com.example.nokiakeyboard'
+              compileSdk 35
+              defaultConfig {
+                  applicationId 'com.example.nokiakeyboard'
+                  minSdk 23
+                  targetSdk 35
+                  versionCode 1
+                  versionName '1.0'
+              }
+          }
+          EOF_FILE
+          mkdir -p P/app/src/main
+          cat > P/app/src/main/AndroidManifest.xml << 'EOF_FILE'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:label="Nokia Style Keyboard"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar"
+                  android:allowBackup="false">
+                  <service
+                      android:name=".NokiaImeService"
+                      android:label="Nokia Style Keyboard"
+                      android:permission="android.permission.BIND_INPUT_METHOD"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.view.InputMethod" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.view.im"
+                          android:resource="@xml/method" />
+                  </service>
+              </application>
+          </manifest>
+          EOF_FILE
+          mkdir -p P/app/src/main/res/xml
+          cat > P/app/src/main/res/xml/method.xml << 'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <input-method xmlns:android="http://schemas.android.com/apk/res/android">
+              <subtype
+                  android:label="العربية / English"
+                  android:imeSubtypeLocale="ar"
+                  android:imeSubtypeMode="keyboard" />
+          </input-method>
+          EOF_FILE
+          mkdir -p P/app/src/main/java/com/example/nokiakeyboard
+          cat > P/app/src/main/java/com/example/nokiakeyboard/NokiaImeService.kt << 'EOF_FILE'
+          package com.example.nokiakeyboard
+
+          import android.inputmethodservice.InputMethodService
+          import android.view.KeyEvent
+          import android.view.View
+
+          class NokiaImeService : InputMethodService() {
+              private var keyboardView: NokiaKeyboardView? = null
+
+              override fun onCreateInputView(): View {
+                  keyboardView = NokiaKeyboardView(this) { key ->
+                      val ic = currentInputConnection ?: return@NokiaKeyboardView
+                      when (key) {
+                          NokiaKeyboardView.ACTION_BACKSPACE -> {
+                              ic.deleteSurroundingText(1, 0)
+                          }
+                          NokiaKeyboardView.ACTION_ENTER -> {
+                              ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
+                              ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ENTER))
+                          }
+                          NokiaKeyboardView.ACTION_SPACE -> ic.commitText(" ", 1)
+                          NokiaKeyboardView.ACTION_LANGUAGE -> keyboardView?.toggleLanguage()
+                          NokiaKeyboardView.ACTION_SHIFT -> keyboardView?.toggleShift()
+                          else -> ic.commitText(key, 1)
+                      }
+                  }
+                  return keyboardView!!
+              }
+
+              override fun onStartInputView(info: android.view.inputmethod.EditorInfo?, restarting: Boolean) {
+                  super.onStartInputView(info, restarting)
+                  keyboardView?.resetShift()
+              }
+          }
+          EOF_FILE
+          mkdir -p P/app/src/main/java/com/example/nokiakeyboard
+          cat > P/app/src/main/java/com/example/nokiakeyboard/NokiaKeyboardView.kt << 'EOF_FILE'
+          package com.example.nokiakeyboard
+
+          import android.content.Context
+          import android.graphics.Canvas
+          import android.graphics.Paint
+          import android.graphics.RectF
+          import android.graphics.Typeface
+          import android.view.MotionEvent
+          import android.view.View
+          import kotlin.math.max
+          import kotlin.math.min
+
+          class NokiaKeyboardView(
+              context: Context,
+              private val onKey: (String) -> Unit
+          ) : View(context) {
+
+              companion object {
+                  const val ACTION_BACKSPACE = "__BACKSPACE__"
+                  const val ACTION_ENTER = "__ENTER__"
+                  const val ACTION_SPACE = "__SPACE__"
+                  const val ACTION_LANGUAGE = "__LANGUAGE__"
+                  const val ACTION_SHIFT = "__SHIFT__"
+              }
+
+              private val density = resources.displayMetrics.density
+              private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+              private var arabic = true
+              private var shifted = false
+              private var pressedIndex = -1
+
+              private data class Key(val label: String, val value: String, val weight: Float = 1f)
+              private fun rows(): List<List<Key>> {
+                  val numberRow = listOf("1","2","3","4","5","6","7","8","9","0").map { Key(it, it) }
+                  val letters: List<List<Key>> = if (arabic) {
+                      listOf(
+                          listOf("ض","ص","ث","ق","ف","غ","ع","ه","خ","ح","ج").map { Key(it, it) },
+                          listOf("ش","س","ي","ب","ل","ا","ت","ن","م","ك").map { Key(it, it) },
+                          listOf(Key("⇧", ACTION_SHIFT, 1.35f)) +
+                              listOf("ئ","ء","ؤ","ر","لا","ى","ة","و").map { Key(it, it) } +
+                              Key("⌫", ACTION_BACKSPACE, 1.35f)
+                      )
+                  } else {
+                      listOf(
+                          listOf("q","w","e","r","t","y","u","i","o","p").map { Key(it, it) },
+                          listOf("a","s","d","f","g","h","j","k","l").map { Key(it, it) },
+                          listOf(Key("⇧", ACTION_SHIFT, 1.35f)) +
+                              listOf("z","x","c","v","b","n","m").map { Key(it, it) } +
+                              Key("⌫", ACTION_BACKSPACE, 1.35f)
+                      )
+                  }
+                  return listOf(numberRow) + letters + listOf(
+                      listOf(
+                          Key(if (arabic) "EN" else "ع", ACTION_LANGUAGE, 1.0f),
+                          Key("☻", "😊", 0.8f),
+                          Key(if (arabic) "مسافة" else "space", ACTION_SPACE, 4.2f),
+                          Key(if (arabic) "، ." else ", .", if (arabic) "،" else ",", 1.0f),
+                          Key("↵", ACTION_ENTER, 1.0f)
+                      )
+                  )
+              }
+
+              fun toggleLanguage() { arabic = !arabic; invalidate() }
+              fun toggleShift() { shifted = !shifted; invalidate() }
+              fun resetShift() { shifted = false; invalidate() }
+
+              private fun keyRects(): List<Pair<RectF, Key>> {
+                  val result = mutableListOf<Pair<RectF, Key>>()
+                  val allRows = rows()
+                  val outer = 7f * density
+                  val rowGap = 7f * density
+                  val top = 9f * density
+                  val bottom = 9f * density
+                  val rowHeight = (height - top - bottom - rowGap * (allRows.size - 1)) / allRows.size
+                  allRows.forEachIndexed { ri, row ->
+                      val gap = 5f * density
+                      val totalWeight = row.sumOf { it.weight.toDouble() }.toFloat()
+                      val available = width - outer * 2 - gap * (row.size - 1)
+                      var x = outer
+                      val y = top + ri * (rowHeight + rowGap)
+                      row.forEach { key ->
+                          val w = available * key.weight / totalWeight
+                          result.add(RectF(x, y, x + w, y + rowHeight) to key)
+                          x += w + gap
+                      }
+                  }
+                  return result
+              }
+
+              override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+                  val w = MeasureSpec.getSize(widthMeasureSpec)
+                  val landscape = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+                  val desired = ((if (landscape) 246 else 282) * density).toInt()
+                  val h = resolveSize(desired, heightMeasureSpec)
+                  setMeasuredDimension(w, h)
+              }
+
+              override fun onDraw(canvas: Canvas) {
+                  super.onDraw(canvas)
+                  canvas.drawColor(android.graphics.Color.rgb(24, 34, 53))
+                  val keys = keyRects()
+                  keys.forEachIndexed { index, (r, key) ->
+                      val active = index == pressedIndex
+                      paint.style = Paint.Style.FILL
+                      paint.color = android.graphics.Color.rgb(7, 12, 22)
+                      canvas.drawRoundRect(RectF(r.left, r.top + 2*density, r.right, r.bottom + 2*density), 11*density, 11*density, paint)
+
+                      paint.color = if (active) android.graphics.Color.rgb(190, 201, 215)
+                          else android.graphics.Color.rgb(226, 231, 237)
+                      canvas.drawRoundRect(r, 10*density, 10*density, paint)
+
+                      paint.style = Paint.Style.STROKE
+                      paint.strokeWidth = 1.2f * density
+                      paint.color = android.graphics.Color.rgb(255, 255, 255)
+                      canvas.drawRoundRect(RectF(r.left + density, r.top + density, r.right - density, r.bottom - density),
+                          9*density, 9*density, paint)
+                      paint.style = Paint.Style.FILL
+                      paint.color = android.graphics.Color.rgb(26, 34, 47)
+                      paint.typeface = Typeface.create("sans-serif", Typeface.BOLD)
+                      val label = if (shifted && !arabic && key.value.length == 1 && key.value[0].isLetter()) key.label.uppercase() else key.label
+                      val size = when {
+                          key.value == ACTION_SPACE -> 12f
+                          label.length > 3 -> 12f
+                          else -> 20f
+                      } * density
+                      paint.textSize = size
+                      paint.textAlign = Paint.Align.CENTER
+                      val baseline = r.centerY() - (paint.ascent() + paint.descent()) / 2
+                      canvas.drawText(label, r.centerX(), baseline, paint)
+                  }
+              }
+
+              override fun onTouchEvent(event: MotionEvent): Boolean {
+                  val keys = keyRects()
+                  when (event.action) {
+                      MotionEvent.ACTION_DOWN -> {
+                          pressedIndex = keys.indexOfFirst { it.first.contains(event.x, event.y) }
+                          invalidate()
+                          return true
+                      }
+                      MotionEvent.ACTION_UP -> {
+                          val index = keys.indexOfFirst { it.first.contains(event.x, event.y) }
+                          if (index >= 0) {
+                              val key = keys[index].second
+                              val value = when {
+                                  key.value == ACTION_SHIFT -> ACTION_SHIFT
+                                  key.value == ACTION_LANGUAGE -> ACTION_LANGUAGE
+                                  key.value == ACTION_BACKSPACE -> ACTION_BACKSPACE
+                                  key.value == ACTION_ENTER -> ACTION_ENTER
+                                  key.value == ACTION_SPACE -> ACTION_SPACE
+                                  shifted && !arabic && key.value.length == 1 -> key.value.uppercase()
+                                  else -> key.value
+                              }
+                              playSoundEffect(android.view.SoundEffectConstants.CLICK)
+                              performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
+                              onKey(value)
+                              if (shifted && !arabic && value.length == 1) shifted = false
+                          }
+                          pressedIndex = -1
+                          invalidate()
+                          return true
+                      }
+                      MotionEvent.ACTION_CANCEL -> {
+                          pressedIndex = -1
+                          invalidate()
+                          return true
+                      }
+                  }
+                  return true
+              }
+          }
+          EOF_FILE
+      - name: Build
+        run: cd P && gradle assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NokiaKeyboard-apk
+          path: P/app/build/outputs/apk/debug/*.apk
