@@ -119,7 +119,12 @@ jobs:
                       val ic = currentInputConnection ?: return@NokiaKeyboardView
                       when (key) {
                           NokiaKeyboardView.ACTION_BACKSPACE -> {
-                              ic.deleteSurroundingText(1, 0)
+                              val before = ic.getTextBeforeCursor(2, 0)
+                              if (before != null && before.length == 2 && Character.isSurrogatePair(before[0], before[1])) {
+                                  ic.deleteSurroundingText(2, 0)
+                              } else {
+                                  ic.deleteSurroundingText(1, 0)
+                              }
                           }
                           NokiaKeyboardView.ACTION_ENTER -> {
                               ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
@@ -150,15 +155,15 @@ jobs:
           cat > P/app/src/main/java/com/example/nokiakeyboard/NokiaKeyboardView.kt << 'EOF_FILE'
           package com.example.nokiakeyboard
 
+          import android.content.ClipboardManager
           import android.content.Context
           import android.content.res.Configuration
           import android.graphics.Canvas
           import android.graphics.Color
           import android.graphics.Paint
+          import android.graphics.Path
           import android.graphics.RectF
           import android.graphics.Typeface
-          import android.os.Handler
-          import android.os.Looper
           import android.view.HapticFeedbackConstants
           import android.view.MotionEvent
           import android.view.SoundEffectConstants
@@ -176,45 +181,48 @@ jobs:
                   const val ACTION_LANGUAGE = "__LANGUAGE__"
                   const val ACTION_SHIFT = "__SHIFT__"
                   const val ACTION_SETTINGS = "__SETTINGS__"
-                  const val ACTION_DIGITS = "__DIGITS__"
-                  const val ACTION_LETTERS = "__LETTERS__"
+                  private const val ACTION_SYMBOLS = "__SYMBOLS__"
+                  private const val ACTION_LETTERS = "__LETTERS__"
+                  private const val ACTION_THEME = "__THEME__"
+                  private const val ACTION_PASTE = "__PASTE__"
+                  private const val ACTION_NOOP = "__NOOP__"
+                  private const val ACTION_EMOJI = "__EMOJI__"
+                  private const val ACTION_EMO_PREV = "__EMO_PREV__"
+                  private const val ACTION_EMO_NEXT = "__EMO_NEXT__"
                   private const val T9 = "T9:"
                   private const val MULTITAP_MS = 900L
-                  private const val LONG_PRESS_MS = 450L
               }
 
               private val density = resources.displayMetrics.density
               private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-              private val uiHandler = Handler(Looper.getMainLooper())
               private var arabic = true
               private var shifted = false
+              private var symbols = false
+              private var emoji = false
+              private var emojiPage = 0
               private var pressedIndex = -1
-              private var longPressed = false
               private var lastT9Digit = ' '
               private var tapCount = 0
               private var lastTapTime = 0L
               private var cycleUpper = false
-              private var digitMode = false
+
+              // kind: 0 = normal key, 1 = function key (accent colour), 2 = flat toolbar icon
+              private val emojiPages: List<List<String>> = listOf(
+                  listOf("😀", "😁", "😂", "😅", "😊", "😍", "😘", "😎", "😜", "😢", "😭", "😡"),
+                  listOf("😴", "😱", "🤔", "🙄", "😏", "😉", "🥰", "🤩", "😇", "🤗", "😋", "🤭"),
+                  listOf("👍", "👎", "👏", "🙏", "💪", "👌", "🙌", "👋", "💖", "💙", "💚", "💛"),
+                  listOf("🔥", "🎉", "💯", "🌹", "🌙", "🌞", "🌟", "🎂", "🎁", "🍕", "🚗", "📱")
+              )
 
               private data class Key(
                   val label: String,
                   val value: String,
                   val weight: Float = 1f,
-                  val sub: String = ""
+                  val corner: String = "",
+                  val kind: Int = 0
               )
 
-              private val longPressRunnable = Runnable {
-                  val keys = keyRects()
-                  if (pressedIndex in keys.indices) {
-                      val v = keys[pressedIndex].second.value
-                      if (v.startsWith(T9)) {
-                          longPressed = true
-                          resetMultiTap()
-                          performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-                          onKey(v.substring(T9.length))
-                      }
-                  }
-              }
+              private class Row(val keys: List<Key>, val h: Float = 1f)
 
               private fun useT9(): Boolean = when (SettingsActivity.layoutMode(context)) {
                   SettingsActivity.MODE_PORTRAIT -> true
@@ -222,23 +230,26 @@ jobs:
                   else -> resources.configuration.orientation != Configuration.ORIENTATION_LANDSCAPE
               }
 
+              private fun digitLabel(d: Char): String =
+                  if (arabic) ('\u0660' + (d - '0')).toString() else d.toString()
+
               private fun lettersFor(d: Char): String {
                   if (arabic) {
                       return when (d) {
-                          '1' -> "،.؟!ءئؤ"
-                          '2' -> "اأبتث"
-                          '3' -> "جحخ"
-                          '4' -> "دذرز"
-                          '5' -> "سشصض"
-                          '6' -> "طظعغ"
-                          '7' -> "فقك"
-                          '8' -> "لمن"
-                          '9' -> "هويةى"
+                          '1' -> "!؟،.:@-'"
+                          '2' -> "بتةث"
+                          '3' -> "اءأإآ"
+                          '4' -> "سشصض"
+                          '5' -> "دذرز"
+                          '6' -> "جحخ"
+                          '7' -> "نهويىؤئ"
+                          '8' -> "فقكلم"
+                          '9' -> "طظعغ"
                           else -> ""
                       }
                   }
                   return when (d) {
-                      '1' -> ".,?!'@-"
+                      '1' -> ".,?!'@-:"
                       '2' -> "abc"
                       '3' -> "def"
                       '4' -> "ghi"
@@ -251,74 +262,118 @@ jobs:
                   }
               }
 
-              private fun t9Rows(): List<List<Key>> {
-                  val top = listOf(
-                      Key("⚙", ACTION_SETTINGS),
-                      Key(if (arabic) "EN" else "ع", ACTION_LANGUAGE),
-                      Key("⇧", ACTION_SHIFT),
-                      Key("⌫", ACTION_BACKSPACE)
-                  )
-                  if (digitMode) {
+              private fun displayFor(d: Char): String {
+                  if (arabic) {
+                      return when (d) {
+                          '1' -> "!؟،."
+                          '3' -> "اء"
+                          '7' -> "نهوي"
+                          else -> lettersFor(d)
+                      }
+                  }
+                  return if (d == '1') ".,?!" else lettersFor(d)
+              }
+
+              private fun toolbar(): Row = Row(
+                  listOf(
+                      Key("⚙", ACTION_SETTINGS, kind = 2),
+                      Key("◐", ACTION_THEME, kind = 2),
+                      Key("📋", ACTION_PASTE, kind = 2),
+                      Key("😊", ACTION_EMOJI, kind = 2)
+                  ),
+                  0.55f
+              )
+
+              private fun t9Rows(): List<Row> {
+                  if (symbols) {
                       fun n(c: Char): Key = Key(c.toString(), c.toString())
                       return listOf(
-                          top,
-                          listOf(n('1'), n('2'), n('3')),
-                          listOf(n('4'), n('5'), n('6')),
-                          listOf(n('7'), n('8'), n('9')),
-                          listOf(Key(if (arabic) "أبج" else "ABC", ACTION_LETTERS), n('0'), Key("↵", ACTION_ENTER))
+                          toolbar(),
+                          Row(listOf(n('1'), n('2'), n('3'), Key("⌫", ACTION_BACKSPACE, kind = 1))),
+                          Row(listOf(n('4'), n('5'), n('6'), Key("↵", ACTION_ENTER, kind = 1))),
+                          Row(listOf(n('7'), n('8'), n('9'), Key(".", ".", kind = 1))),
+                          Row(
+                              listOf(
+                                  Key(if (arabic) "أبج" else "ABC", ACTION_LETTERS, kind = 1),
+                                  n('0'),
+                                  Key(if (arabic) "مسافة" else "space", ACTION_SPACE),
+                                  Key(",", ",", kind = 1)
+                              )
+                          )
                       )
                   }
-                  fun d(c: Char): Key = Key(lettersFor(c), T9 + c)
+                  fun d(c: Char): Key = Key(displayFor(c), T9 + c, 1f, digitLabel(c))
                   return listOf(
-                      top,
-                      listOf(d('1'), d('2'), d('3')),
-                      listOf(d('4'), d('5'), d('6')),
-                      listOf(d('7'), d('8'), d('9')),
-                      listOf(
-                          Key("123", ACTION_DIGITS),
-                          Key("☻", "😊"),
-                          Key(if (arabic) "مسافة" else "space", ACTION_SPACE, 2f),
-                          Key("↵", ACTION_ENTER)
+                      toolbar(),
+                      Row(listOf(d('1'), d('2'), d('3'), Key("⌫", ACTION_BACKSPACE, kind = 1))),
+                      Row(listOf(d('4'), d('5'), d('6'), Key("↵", ACTION_ENTER, kind = 1))),
+                      Row(listOf(d('7'), d('8'), d('9'), Key("⇧", ACTION_SHIFT, kind = 1))),
+                      Row(
+                          listOf(
+                              Key("!#1", ACTION_SYMBOLS, kind = 1),
+                              Key("", ACTION_SPACE, 1f, digitLabel('0')),
+                              Key(if (arabic) "AR" else "EN", ACTION_LANGUAGE, kind = 1),
+                              Key(".", ".", kind = 1)
+                          )
                       )
                   )
               }
 
-              private fun qwertyRows(): List<List<Key>> {
+              private fun qwertyRows(): List<Row> {
                   val numberRow = listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0").map { Key(it, it) }
                   val letters: List<List<Key>> = if (arabic) {
                       listOf(
                           listOf("ض", "ص", "ث", "ق", "ف", "غ", "ع", "ه", "خ", "ح", "ج").map { Key(it, it) },
                           listOf("ش", "س", "ي", "ب", "ل", "ا", "ت", "ن", "م", "ك").map { Key(it, it) },
-                          listOf(Key("⇧", ACTION_SHIFT, 1.35f)) +
-                              listOf("ئ", "ء", "ؤ", "ر", "لا", "ى", "ة", "و").map { Key(it, it) } +
-                              Key("⌫", ACTION_BACKSPACE, 1.35f)
+                          listOf(Key("⇧", ACTION_SHIFT, 1.35f, kind = 1)) +
+                              listOf("ئ", "ء", "ؤ", "ر", "ى", "ة", "و").map { Key(it, it) } +
+                              Key("⌫", ACTION_BACKSPACE, 1.35f, kind = 1)
                       )
                   } else {
                       listOf(
                           listOf("q", "w", "e", "r", "t", "y", "u", "i", "o", "p").map { Key(it, it) },
                           listOf("a", "s", "d", "f", "g", "h", "j", "k", "l").map { Key(it, it) },
-                          listOf(Key("⇧", ACTION_SHIFT, 1.35f)) +
+                          listOf(Key("⇧", ACTION_SHIFT, 1.35f, kind = 1)) +
                               listOf("z", "x", "c", "v", "b", "n", "m").map { Key(it, it) } +
-                              Key("⌫", ACTION_BACKSPACE, 1.35f)
+                              Key("⌫", ACTION_BACKSPACE, 1.35f, kind = 1)
                       )
                   }
-                  return listOf(numberRow) + letters + listOf(
-                      listOf(
-                          Key(if (arabic) "EN" else "ع", ACTION_LANGUAGE, 1.0f),
-                          Key("⚙", ACTION_SETTINGS, 0.9f),
-                          Key("☻", "😊", 0.8f),
-                          Key(if (arabic) "مسافة" else "space", ACTION_SPACE, 3.5f),
-                          Key(if (arabic) "، ." else ", .", if (arabic) "،" else ",", 1.0f),
-                          Key("↵", ACTION_ENTER, 1.0f)
+                  val bottom = listOf(
+                      Key(if (arabic) "EN" else "ع", ACTION_LANGUAGE, 1.0f, kind = 1),
+                      Key("⚙", ACTION_SETTINGS, 0.8f, kind = 1),
+                      Key("◐", ACTION_THEME, 0.8f, kind = 1),
+                      Key("☻", ACTION_EMOJI, 0.8f),
+                      Key(if (arabic) "مسافة" else "space", ACTION_SPACE, 2.9f),
+                      Key(if (arabic) "،" else ",", if (arabic) "،" else ",", 0.8f),
+                      Key("↵", ACTION_ENTER, 1.0f, kind = 1)
+                  )
+                  return (listOf(numberRow) + letters + listOf(bottom)).map { Row(it) }
+              }
+
+              private fun emojiRows(): List<Row> {
+                  val page = emojiPages[emojiPage]
+                  fun e(i: Int): Key = Key(page[i], page[i])
+                  return listOf(
+                      toolbar(),
+                      Row(listOf(e(0), e(1), e(2), e(3))),
+                      Row(listOf(e(4), e(5), e(6), e(7))),
+                      Row(listOf(e(8), e(9), e(10), e(11))),
+                      Row(
+                          listOf(
+                              Key(if (arabic) "أبج" else "ABC", ACTION_LETTERS, kind = 1),
+                              Key("◄", ACTION_EMO_PREV, kind = 1),
+                              Key("►", ACTION_EMO_NEXT, kind = 1),
+                              Key("⌫", ACTION_BACKSPACE, kind = 1)
+                          )
                       )
                   )
               }
 
-              private fun rows(): List<List<Key>> = if (useT9()) t9Rows() else qwertyRows()
+              private fun rows(): List<Row> = if (emoji) emojiRows() else if (useT9()) t9Rows() else qwertyRows()
 
               fun toggleLanguage() { arabic = !arabic; resetMultiTap(); invalidate() }
               fun toggleShift() { shifted = !shifted; invalidate() }
-              fun resetShift() { shifted = false; digitMode = false; resetMultiTap(); invalidate() }
+              fun resetShift() { shifted = false; symbols = false; emoji = false; resetMultiTap(); invalidate() }
               fun refreshLayout() { requestLayout(); invalidate() }
 
               private fun resetMultiTap() {
@@ -329,90 +384,159 @@ jobs:
               private fun keyRects(): List<Pair<RectF, Key>> {
                   val result = mutableListOf<Pair<RectF, Key>>()
                   val allRows = rows()
-                  val outer = 7f * density
-                  val rowGap = 7f * density
-                  val top = 9f * density
-                  val bottom = 9f * density
-                  val rowHeight = (height - top - bottom - rowGap * (allRows.size - 1)) / allRows.size
-                  allRows.forEachIndexed { ri, row ->
-                      val gap = 5f * density
-                      val totalWeight = row.sumOf { it.weight.toDouble() }.toFloat()
-                      val available = width - outer * 2 - gap * (row.size - 1)
+                  val outer = 10f * density
+                  val gap = 7f * density
+                  val top = 6f * density
+                  val bottom = 10f * density
+                  val totalH = allRows.sumOf { it.h.toDouble() }.toFloat()
+                  val avail = height - top - bottom - gap * (allRows.size - 1)
+                  var y = top
+                  allRows.forEach { row ->
+                      val rh = avail * row.h / totalH
+                      val totalW = row.keys.sumOf { it.weight.toDouble() }.toFloat()
+                      val availW = width - outer * 2 - gap * (row.keys.size - 1)
                       var x = outer
-                      val y = top + ri * (rowHeight + rowGap)
-                      row.forEach { key ->
-                          val w = available * key.weight / totalWeight
-                          result.add(RectF(x, y, x + w, y + rowHeight) to key)
+                      row.keys.forEach { key ->
+                          val w = availW * key.weight / totalW
+                          result.add(RectF(x, y, x + w, y + rh) to key)
                           x += w + gap
                       }
+                      y += rh + gap
                   }
                   return result
               }
 
               override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
                   val w = MeasureSpec.getSize(widthMeasureSpec)
-                  val desired = ((if (useT9()) 340 else 270) * density).toInt()
+                  val desired = ((if (useT9()) 350 else 270) * density).toInt()
                   val h = resolveSize(desired, heightMeasureSpec)
                   setMeasuredDimension(w, h)
               }
 
+              private fun mix(a: Int, b: Int, t: Float): Int = Color.rgb(
+                  (Color.red(a) + (Color.red(b) - Color.red(a)) * t).toInt(),
+                  (Color.green(a) + (Color.green(b) - Color.green(a)) * t).toInt(),
+                  (Color.blue(a) + (Color.blue(b) - Color.blue(a)) * t).toInt()
+              )
+
+              private fun fitSize(lines: List<String>, maxW: Float, start: Float): Float {
+                  var size = start
+                  paint.textSize = size
+                  while (size > 10f * density && lines.any { paint.measureText(it) > maxW }) {
+                      size -= density
+                      paint.textSize = size
+                  }
+                  return size
+              }
+
+              private fun drawLetters(canvas: Canvas, r: RectF, letters: String) {
+                  val upper = if (shifted && !arabic) letters.uppercase() else letters
+                  // a space between letters keeps every Arabic letter separate (not joined)
+                  val shown = upper.toCharArray().joinToString(" ")
+                  paint.textSize = fitSize(listOf(shown), r.width() - 8f * density, 26f * density)
+                  val baseline = r.centerY() - (paint.ascent() + paint.descent()) / 2
+                  canvas.drawText(shown, r.centerX(), baseline, paint)
+              }
+
+              private fun drawLanguageKey(canvas: Canvas, r: RectF, code: String, accent: Int) {
+                  paint.color = accent
+                  paint.style = Paint.Style.FILL
+                  paint.textAlign = Paint.Align.CENTER
+                  paint.textSize = 15f * density
+                  val ty = r.top + r.height() * 0.36f
+                  canvas.drawText(code, r.centerX(), ty + 5f * density, paint)
+                  val s = 5f * density
+                  val m = 10f * density
+                  val left = Path()
+                  left.moveTo(r.left + m + s, ty - s)
+                  left.lineTo(r.left + m, ty)
+                  left.lineTo(r.left + m + s, ty + s)
+                  left.close()
+                  canvas.drawPath(left, paint)
+                  val right = Path()
+                  right.moveTo(r.right - m - s, ty - s)
+                  right.lineTo(r.right - m, ty)
+                  right.lineTo(r.right - m - s, ty + s)
+                  right.close()
+                  canvas.drawPath(right, paint)
+                  paint.style = Paint.Style.STROKE
+                  paint.strokeWidth = 1.8f * density
+                  val by = r.top + r.height() * 0.70f
+                  val bw = r.width() * 0.26f
+                  val bh = 7f * density
+                  val u = Path()
+                  u.moveTo(r.centerX() - bw, by - bh)
+                  u.lineTo(r.centerX() - bw, by)
+                  u.lineTo(r.centerX() + bw, by)
+                  u.lineTo(r.centerX() + bw, by - bh)
+                  canvas.drawPath(u, paint)
+                  paint.style = Paint.Style.FILL
+              }
+
               override fun onDraw(canvas: Canvas) {
                   super.onDraw(canvas)
-                  canvas.drawColor(Color.rgb(24, 34, 53))
+                  val th = SettingsActivity.theme(context)
+                  canvas.drawColor(th.bg)
+                  val t9 = useT9()
+                  val tint = if (th.dark) Color.WHITE else Color.BLACK
                   val keys = keyRects()
                   keys.forEachIndexed { index, (r, key) ->
+                      if (key.value == ACTION_NOOP) return@forEachIndexed
                       val active = index == pressedIndex
-                      paint.style = Paint.Style.FILL
-                      paint.color = Color.rgb(7, 12, 22)
-                      canvas.drawRoundRect(RectF(r.left, r.top + 2 * density, r.right, r.bottom + 2 * density), 11 * density, 11 * density, paint)
-
-                      paint.color = if (active) Color.rgb(190, 201, 215) else Color.rgb(226, 231, 237)
-                      canvas.drawRoundRect(r, 10 * density, 10 * density, paint)
-
-                      paint.style = Paint.Style.STROKE
-                      paint.strokeWidth = 1.2f * density
-                      paint.color = Color.rgb(255, 255, 255)
-                      canvas.drawRoundRect(
-                          RectF(r.left + density, r.top + density, r.right - density, r.bottom - density),
-                          9 * density, 9 * density, paint
-                      )
-                      paint.style = Paint.Style.FILL
-                      paint.color = Color.rgb(26, 34, 47)
-                      paint.typeface = Typeface.create("sans-serif", Typeface.BOLD)
-                      paint.textAlign = Paint.Align.CENTER
-
-                      if (key.sub.isNotEmpty()) {
-                          paint.textSize = 30f * density
-                          canvas.drawText(key.label, r.centerX(), r.centerY() - 3f * density, paint)
-                          paint.textSize = 14f * density
-                          val subText = if (shifted && !arabic) key.sub.uppercase() else key.sub
-                          canvas.drawText(subText, r.centerX(), r.centerY() + 19f * density, paint)
-                      } else {
-                          val upperOk = key.value.startsWith(T9) || (key.value.length == 1 && key.value[0].isLetter())
-                          val label = if (shifted && !arabic && upperOk) key.label.uppercase() else key.label
-                          val size = when {
-                              key.value.startsWith(T9) -> if (label.length <= 4) 30f else 26f
-                              digitMode && label.length == 1 && label[0].isDigit() -> 36f
-                              key.value == ACTION_SPACE -> 20f
-                              label.length > 3 -> 16f
-                              else -> 26f
-                          } * density
-                          paint.textSize = size
-                          if (key.value.startsWith(T9)) {
-                              val chars = label.toCharArray().map { it.toString() }
-                              val half = (chars.size + 1) / 2
-                              val lines = if (chars.size > 4) listOf(chars.take(half), chars.drop(half)) else listOf(chars)
-                              val lineHeight = paint.fontSpacing
-                              var y = r.centerY() - lineHeight * lines.size / 2 - paint.ascent()
-                              for (ln in lines) {
-                                  canvas.drawText(ln.joinToString(" "), r.centerX(), y, paint)
-                                  y += lineHeight
-                              }
-                          } else {
-                              val baseline = r.centerY() - (paint.ascent() + paint.descent()) / 2
-                              canvas.drawText(label, r.centerX(), baseline, paint)
-                          }
+                      val fn = key.kind == 1
+                      val radius = 9f * density
+                      val fg = if (fn) th.accent else th.text
+                      if (key.kind != 2) {
+                          paint.style = Paint.Style.FILL
+                          paint.color = if (active) mix(th.key, tint, 0.25f) else th.key
+                          canvas.drawRoundRect(r, radius, radius, paint)
+                          paint.style = Paint.Style.STROKE
+                          paint.strokeWidth = 1.6f * density
+                          paint.color = if (fn) th.accent else th.border
+                          canvas.drawRoundRect(
+                              RectF(r.left + density, r.top + density, r.right - density, r.bottom - density),
+                              radius, radius, paint
+                          )
+                      } else if (active) {
+                          paint.style = Paint.Style.FILL
+                          paint.color = mix(th.bg, tint, 0.25f)
+                          canvas.drawRoundRect(r, radius, radius, paint)
                       }
+                      paint.style = Paint.Style.FILL
+                      paint.typeface = Typeface.DEFAULT
+                      paint.textAlign = Paint.Align.CENTER
+                      paint.color = fg
+
+                      if (key.corner.isNotEmpty()) {
+                          paint.textAlign = Paint.Align.RIGHT
+                          paint.textSize = 11f * density
+                          paint.color = Color.argb(200, Color.red(th.text), Color.green(th.text), Color.blue(th.text))
+                          canvas.drawText(key.corner, r.right - 9f * density, r.top + 14f * density, paint)
+                          paint.textAlign = Paint.Align.CENTER
+                          paint.color = fg
+                      }
+
+                      if (t9 && key.value == ACTION_LANGUAGE) {
+                          drawLanguageKey(canvas, r, key.label, th.accent)
+                          return@forEachIndexed
+                      }
+                      if (key.value.startsWith(T9)) {
+                          drawLetters(canvas, r, key.label)
+                          return@forEachIndexed
+                      }
+                      if (key.label.isEmpty()) return@forEachIndexed
+
+                      val label = if (shifted && !arabic && key.value.length == 1 && key.value[0].isLetter()) key.label.uppercase() else key.label
+                      val size = when {
+                          emoji && key.kind == 0 -> 30f
+                          key.value == ACTION_SPACE -> 18f
+                          label.length > 3 -> 16f
+                          fn -> 26f
+                          else -> 24f
+                      }
+                      paint.textSize = size * density
+                      val baseline = r.centerY() - (paint.ascent() + paint.descent()) / 2
+                      canvas.drawText(label, r.centerX(), baseline, paint)
                   }
               }
 
@@ -421,12 +545,16 @@ jobs:
                   performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
               }
 
-              private fun handleT9(d: Char) {
-                  if (d == '0') {
-                      resetMultiTap()
-                      onKey(ACTION_SPACE)
-                      return
+              private fun paste() {
+                  val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                  val clip = cm.primaryClip
+                  if (clip != null && clip.itemCount > 0) {
+                      val text = clip.getItemAt(0).coerceToText(context).toString()
+                      if (text.isNotEmpty()) onKey(text)
                   }
+              }
+
+              private fun handleT9(d: Char) {
                   val letters = lettersFor(d)
                   if (letters.isEmpty()) return
                   val now = System.currentTimeMillis()
@@ -447,22 +575,40 @@ jobs:
 
               private fun handleKey(key: Key) {
                   val v = key.value
+                  if (v == ACTION_NOOP) return
                   if (v.startsWith(T9)) {
                       handleT9(v[T9.length])
                       return
                   }
                   resetMultiTap()
-                  if (v == ACTION_DIGITS) {
-                      digitMode = true
-                      invalidate()
-                      return
-                  }
-                  if (v == ACTION_LETTERS) {
-                      digitMode = false
-                      invalidate()
-                      return
-                  }
                   when (v) {
+                      ACTION_SYMBOLS -> {
+                          symbols = true
+                          invalidate()
+                      }
+                      ACTION_LETTERS -> {
+                          symbols = false
+                          emoji = false
+                          invalidate()
+                      }
+                      ACTION_EMOJI -> {
+                          emoji = !emoji
+                          emojiPage = 0
+                          invalidate()
+                      }
+                      ACTION_EMO_PREV -> {
+                          emojiPage = (emojiPage + emojiPages.size - 1) % emojiPages.size
+                          invalidate()
+                      }
+                      ACTION_EMO_NEXT -> {
+                          emojiPage = (emojiPage + 1) % emojiPages.size
+                          invalidate()
+                      }
+                      ACTION_THEME -> {
+                          SettingsActivity.nextTheme(context)
+                          invalidate()
+                      }
+                      ACTION_PASTE -> paste()
                       ACTION_SHIFT, ACTION_LANGUAGE, ACTION_BACKSPACE, ACTION_ENTER, ACTION_SPACE, ACTION_SETTINGS -> onKey(v)
                       else -> {
                           val upper = shifted && !arabic && v.length == 1 && v[0].isLetter()
@@ -476,16 +622,13 @@ jobs:
                   val keys = keyRects()
                   when (event.action) {
                       MotionEvent.ACTION_DOWN -> {
-                          uiHandler.removeCallbacks(longPressRunnable)
-                          longPressed = false
                           pressedIndex = keys.indexOfFirst { it.first.contains(event.x, event.y) }
                           invalidate()
                           return true
                       }
                       MotionEvent.ACTION_UP -> {
-                          uiHandler.removeCallbacks(longPressRunnable)
                           val index = keys.indexOfFirst { it.first.contains(event.x, event.y) }
-                          if (index >= 0 && index == pressedIndex && !longPressed) {
+                          if (index >= 0 && index == pressedIndex) {
                               feedback()
                               handleKey(keys[index].second)
                           }
@@ -494,7 +637,6 @@ jobs:
                           return true
                       }
                       MotionEvent.ACTION_CANCEL -> {
-                          uiHandler.removeCallbacks(longPressRunnable)
                           pressedIndex = -1
                           invalidate()
                           return true
@@ -512,8 +654,10 @@ jobs:
           import android.content.Context
           import android.content.Intent
           import android.graphics.Color
+          import android.graphics.drawable.GradientDrawable
           import android.os.Bundle
           import android.provider.Settings
+          import android.view.Gravity
           import android.view.View
           import android.view.inputmethod.InputMethodManager
           import android.widget.Button
@@ -524,18 +668,56 @@ jobs:
           import android.widget.ScrollView
           import android.widget.TextView
 
+          class Theme(
+              val name: String,
+              val bg: Int,
+              val key: Int,
+              val text: Int,
+              val border: Int,
+              val accent: Int,
+              val dark: Boolean
+          )
+
           class SettingsActivity : Activity() {
 
               companion object {
                   const val PREFS = "nokia_prefs"
                   const val KEY_MODE = "layout_mode"
+                  const val KEY_THEME = "theme_index"
                   const val MODE_AUTO = 0
                   const val MODE_PORTRAIT = 1
                   const val MODE_LANDSCAPE = 2
 
+                  val THEMES: List<Theme> = listOf(
+                      Theme("أسود وأصفر", Color.parseColor("#000000"), Color.parseColor("#0A0A0A"), Color.parseColor("#FFFFFF"), Color.parseColor("#FFFFFF"), Color.parseColor("#FFE24A"), true),
+                      Theme("أسود وأخضر", Color.parseColor("#000000"), Color.parseColor("#0A0A0A"), Color.parseColor("#FFFFFF"), Color.parseColor("#FFFFFF"), Color.parseColor("#4ADE80"), true),
+                      Theme("أسود وأزرق", Color.parseColor("#000000"), Color.parseColor("#0A0A0A"), Color.parseColor("#FFFFFF"), Color.parseColor("#FFFFFF"), Color.parseColor("#4DA3FF"), true),
+                      Theme("أسود وزهري", Color.parseColor("#000000"), Color.parseColor("#0A0A0A"), Color.parseColor("#FFFFFF"), Color.parseColor("#FFFFFF"), Color.parseColor("#FF6FA5"), true),
+                      Theme("أسود وبرتقالي", Color.parseColor("#000000"), Color.parseColor("#0A0A0A"), Color.parseColor("#FFFFFF"), Color.parseColor("#FFFFFF"), Color.parseColor("#FF9F43"), true),
+                      Theme("فاتح", Color.parseColor("#EDEFF2"), Color.parseColor("#FFFFFF"), Color.parseColor("#111111"), Color.parseColor("#8A94A6"), Color.parseColor("#1A73E8"), false),
+                      Theme("نوكيا كلاسيكي", Color.parseColor("#182235"), Color.parseColor("#E2E7ED"), Color.parseColor("#1A222F"), Color.parseColor("#FFFFFF"), Color.parseColor("#1F4E9C"), false)
+                  )
+
                   fun layoutMode(context: Context): Int =
                       context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt(KEY_MODE, MODE_AUTO)
+
+                  fun themeIndex(context: Context): Int {
+                      val i = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt(KEY_THEME, 0)
+                      return if (i in THEMES.indices) i else 0
+                  }
+
+                  fun theme(context: Context): Theme = THEMES[themeIndex(context)]
+
+                  fun nextTheme(context: Context) {
+                      val next = (themeIndex(context) + 1) % THEMES.size
+                      context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt(KEY_THEME, next).apply()
+                  }
               }
+
+              private lateinit var themeName: TextView
+              private lateinit var previewBox: LinearLayout
+              private lateinit var previewKey: TextView
+              private lateinit var previewFn: TextView
 
               private fun makeButton(label: String, onClick: () -> Unit): Button {
                   val b = Button(this)
@@ -550,6 +732,24 @@ jobs:
                   t.textSize = size
                   t.setTextColor(Color.WHITE)
                   return t
+              }
+
+              private fun keyBg(fill: Int, stroke: Int): GradientDrawable {
+                  val g = GradientDrawable()
+                  g.setColor(fill)
+                  g.cornerRadius = 12f * resources.displayMetrics.density
+                  g.setStroke((2 * resources.displayMetrics.density).toInt(), stroke)
+                  return g
+              }
+
+              private fun refreshPreview() {
+                  val t = theme(this)
+                  themeName.text = "الألوان الحالية: " + t.name
+                  previewBox.setBackgroundColor(t.bg)
+                  previewKey.setTextColor(t.text)
+                  previewKey.background = keyBg(t.key, t.border)
+                  previewFn.setTextColor(t.accent)
+                  previewFn.background = keyBg(t.key, t.accent)
               }
 
               override fun onCreate(savedInstanceState: Bundle?) {
@@ -567,8 +767,8 @@ jobs:
 
                   val group = RadioGroup(this)
                   val options = listOf(
-                      MODE_AUTO to "تلقائي (عمودي T9 / أفقي كامل)",
-                      MODE_PORTRAIT to "عمودي (أزرار نوكيا بأرقام T9)",
+                      MODE_AUTO to "تلقائي (عمودي 3×4 / أفقي كامل)",
+                      MODE_PORTRAIT to "عمودي (أزرار 3×4)",
                       MODE_LANDSCAPE to "أفقي (كيبورد كامل بحروف)"
                   )
                   val current = layoutMode(this)
@@ -590,6 +790,35 @@ jobs:
                       }
                   }
                   root.addView(group)
+
+                  root.addView(makeText("\nالألوان:", 18f))
+                  themeName = makeText("", 16f)
+                  root.addView(themeName)
+
+                  previewBox = LinearLayout(this)
+                  previewBox.orientation = LinearLayout.HORIZONTAL
+                  previewBox.setPadding((10 * d).toInt(), (10 * d).toInt(), (10 * d).toInt(), (10 * d).toInt())
+                  previewKey = TextView(this)
+                  previewKey.text = "ب ت ة ث"
+                  previewKey.textSize = 20f
+                  previewKey.gravity = Gravity.CENTER
+                  previewFn = TextView(this)
+                  previewFn.text = "⌫"
+                  previewFn.textSize = 24f
+                  previewFn.gravity = Gravity.CENTER
+                  val lp1 = LinearLayout.LayoutParams(0, (64 * d).toInt(), 2f)
+                  lp1.setMargins((4 * d).toInt(), 0, (4 * d).toInt(), 0)
+                  val lp2 = LinearLayout.LayoutParams(0, (64 * d).toInt(), 1f)
+                  lp2.setMargins((4 * d).toInt(), 0, (4 * d).toInt(), 0)
+                  previewBox.addView(previewKey, lp1)
+                  previewBox.addView(previewFn, lp2)
+                  root.addView(previewBox)
+
+                  root.addView(makeButton("تغيير الألوان") {
+                      nextTheme(this)
+                      refreshPreview()
+                  })
+                  refreshPreview()
 
                   root.addView(makeText("\n", 12f))
                   root.addView(makeButton("1) تفعيل الكيبورد") {
