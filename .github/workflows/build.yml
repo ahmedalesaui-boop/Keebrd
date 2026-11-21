@@ -206,6 +206,9 @@ jobs:
                   private const val ACTION_PASTE = "__PASTE__"
                   private const val ACTION_NOOP = "__NOOP__"
                   private const val ACTION_EMOJI = "__EMOJI__"
+                  private const val ACTION_SPECIAL = "__SPECIAL__"
+                  private const val ACTION_SP_PREV = "__SP_PREV__"
+                  private const val ACTION_SP_NEXT = "__SP_NEXT__"
                   private const val ACTION_EMO_PREV = "__EMO_PREV__"
                   private const val ACTION_EMO_NEXT = "__EMO_NEXT__"
                   private const val T9 = "T9:"
@@ -218,6 +221,8 @@ jobs:
               private var shifted = false
               private var symbols = false
               private var emoji = false
+              private var special = false
+              private var specialPage = 0
               private var emojiPage = 0
               private var pressedIndex = -1
               private var lastT9Digit = ' '
@@ -231,6 +236,17 @@ jobs:
                   listOf("😴", "😱", "🤔", "🙄", "😏", "😉", "🥰", "🤩", "😇", "🤗", "😋", "🤭"),
                   listOf("👍", "👎", "👏", "🙏", "💪", "👌", "🙌", "👋", "💖", "💙", "💚", "💛"),
                   listOf("🔥", "🎉", "💯", "🌹", "🌙", "🌞", "🌟", "🎂", "🎁", "🍕", "🚗", "📱")
+              )
+
+              // Special-letters panel: page 0 and 1 are extra Arabic letters, page 2 is the diacritics (special)
+              private val specialPages: List<List<String>> = listOf(
+                  listOf("أ", "إ", "آ", "ء", "ؤ", "ئ", "ى", "ة", "پ", "چ", "ڤ", "گ"),
+                  listOf("ژ", "ڭ", "ڨ", "ۆ", "ێ", "ە", "ڕ", "ڵ", "ی", "ک", "ھ", "ٹ"),
+                  listOf(
+                      "\u064E", "\u064F", "\u0650", "\u0652",
+                      "\u0651", "\u064B", "\u064C", "\u064D",
+                      "\u0670", "\u0653", "\u0640", "\u0654"
+                  )
               )
 
               private data class Key(
@@ -256,13 +272,13 @@ jobs:
                   if (arabic) {
                       return when (d) {
                           '1' -> "!؟،.:@-'"
-                          '2' -> "بتةث"
-                          '3' -> "اءأإآ"
+                          '2' -> "بپتةث"
+                          '3' -> "اأإآءؤئ"
                           '4' -> "سشصض"
-                          '5' -> "دذرز"
-                          '6' -> "جحخ"
-                          '7' -> "نهويىؤئ"
-                          '8' -> "فقكلم"
+                          '5' -> "دذرزژ"
+                          '6' -> "جچحخ"
+                          '7' -> "نهويى"
+                          '8' -> "فڤقكگلم"
                           '9' -> "طظعغ"
                           else -> ""
                       }
@@ -281,24 +297,13 @@ jobs:
                   }
               }
 
-              private fun displayFor(d: Char): String {
-                  if (arabic) {
-                      return when (d) {
-                          '1' -> "!؟،."
-                          '3' -> "اء"
-                          '7' -> "نهوي"
-                          else -> lettersFor(d)
-                      }
-                  }
-                  return if (d == '1') ".,?!" else lettersFor(d)
-              }
-
               private fun toolbar(): Row = Row(
                   listOf(
                       Key("⚙", ACTION_SETTINGS, kind = 2),
                       Key("🎤", ACTION_MIC, kind = 2),
                       Key("◐", ACTION_THEME, kind = 2),
                       Key("📋", ACTION_PASTE, kind = 2),
+                      Key("أڤ", ACTION_SPECIAL, kind = 2),
                       Key("😊", ACTION_EMOJI, kind = 2)
                   ),
                   0.55f
@@ -322,7 +327,7 @@ jobs:
                           )
                       )
                   }
-                  fun d(c: Char): Key = Key(displayFor(c), T9 + c, 1f, digitLabel(c))
+                  fun d(c: Char): Key = Key(lettersFor(c), T9 + c, 1f, digitLabel(c))
                   return listOf(
                       toolbar(),
                       Row(listOf(d('1'), d('2'), d('3'), Key("⌫", ACTION_BACKSPACE, kind = 1))),
@@ -331,8 +336,8 @@ jobs:
                       Row(
                           listOf(
                               Key("!#1", ACTION_SYMBOLS, kind = 1),
-                              Key("", ACTION_SPACE, 1f, digitLabel('0')),
                               Key(if (arabic) "AR" else "EN", ACTION_LANGUAGE, kind = 1),
+                              Key("", ACTION_SPACE, 1f, digitLabel('0')),
                               Key(".", ".", kind = 1)
                           )
                       )
@@ -363,8 +368,9 @@ jobs:
                       Key("⚙", ACTION_SETTINGS, 0.8f, kind = 1),
                       Key("◐", ACTION_THEME, 0.8f, kind = 1),
                       Key("🎤", ACTION_MIC, 0.8f, kind = 1),
+                      Key("أڤ", ACTION_SPECIAL, 0.8f, kind = 1),
                       Key("☻", ACTION_EMOJI, 0.8f),
-                      Key(if (arabic) "مسافة" else "space", ACTION_SPACE, 2.1f),
+                      Key(if (arabic) "مسافة" else "space", ACTION_SPACE, 1.5f),
                       Key(if (arabic) "،" else ",", if (arabic) "،" else ",", 0.8f),
                       Key("↵", ACTION_ENTER, 1.0f, kind = 1)
                   )
@@ -390,11 +396,37 @@ jobs:
                   )
               }
 
-              private fun rows(): List<Row> = if (emoji) emojiRows() else if (useT9()) t9Rows() else qwertyRows()
+              private fun specialLabel(m: String): String {
+                  if (m == "\u0640") return "\u0640\u0640\u0640"
+                  val c = m[0]
+                  return if (m.length == 1 && (c in '\u064B'..'\u065F' || c == '\u0670')) "\u25CC" + m else m
+              }
+
+              private fun specialRows(): List<Row> {
+                  val page = specialPages[specialPage]
+                  fun k(i: Int): Key = Key(specialLabel(page[i]), page[i])
+                  return listOf(
+                      toolbar(),
+                      Row(listOf(k(0), k(1), k(2), k(3))),
+                      Row(listOf(k(4), k(5), k(6), k(7))),
+                      Row(listOf(k(8), k(9), k(10), k(11))),
+                      Row(
+                          listOf(
+                              Key(if (arabic) "أبج" else "ABC", ACTION_LETTERS, 1f, kind = 1),
+                              Key("◄", ACTION_SP_PREV, 0.8f, kind = 1),
+                              Key("►", ACTION_SP_NEXT, 0.8f, kind = 1),
+                              Key(if (arabic) "مسافة" else "space", ACTION_SPACE, 1.6f),
+                              Key("⌫", ACTION_BACKSPACE, 1f, kind = 1)
+                          )
+                      )
+                  )
+              }
+
+              private fun rows(): List<Row> = if (special) specialRows() else if (emoji) emojiRows() else if (useT9()) t9Rows() else qwertyRows()
 
               fun toggleLanguage() { arabic = !arabic; resetMultiTap(); invalidate() }
               fun toggleShift() { shifted = !shifted; invalidate() }
-              fun resetShift() { shifted = false; symbols = false; emoji = false; resetMultiTap(); invalidate() }
+              fun resetShift() { shifted = false; symbols = false; emoji = false; special = false; resetMultiTap(); invalidate() }
               fun refreshLayout() { requestLayout(); invalidate() }
               fun isArabic(): Boolean = arabic
 
@@ -430,7 +462,8 @@ jobs:
 
               override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
                   val w = MeasureSpec.getSize(widthMeasureSpec)
-                  val desired = ((if (useT9()) 350 else 270) * density).toInt()
+                  val baseDp = if (useT9()) 380 else 290
+                  val desired = (baseDp * SettingsActivity.kbScale(context) / 100f * density).toInt()
                   val h = resolveSize(desired, heightMeasureSpec)
                   setMeasuredDimension(w, h)
               }
@@ -462,7 +495,7 @@ jobs:
                   val base = SettingsActivity.letterSize(context) * density
                   paint.textSize = base
                   var lines = listOf(one)
-                  if (base > 26f * density && chars.size > 2 && paint.measureText(one) > maxW) {
+                  if (chars.size > 4) {
                       val half = (chars.size + 1) / 2
                       lines = listOf(chars.take(half).joinToString(" "), chars.drop(half).joinToString(" "))
                   }
@@ -571,6 +604,7 @@ jobs:
 
                       val label = if (shifted && !arabic && key.value.length == 1 && key.value[0].isLetter()) key.label.uppercase() else key.label
                       val size = when {
+                          special && key.kind == 0 -> 34f
                           emoji && key.kind == 0 -> 30f
                           key.value == ACTION_SPACE -> 18f
                           label.length > 3 -> 16f
@@ -632,11 +666,27 @@ jobs:
                       ACTION_LETTERS -> {
                           symbols = false
                           emoji = false
+                          special = false
                           invalidate()
                       }
                       ACTION_EMOJI -> {
                           emoji = !emoji
+                          special = false
                           emojiPage = 0
+                          invalidate()
+                      }
+                      ACTION_SPECIAL -> {
+                          special = !special
+                          emoji = false
+                          specialPage = 0
+                          invalidate()
+                      }
+                      ACTION_SP_PREV -> {
+                          specialPage = (specialPage + specialPages.size - 1) % specialPages.size
+                          invalidate()
+                      }
+                      ACTION_SP_NEXT -> {
+                          specialPage = (specialPage + 1) % specialPages.size
                           invalidate()
                       }
                       ACTION_EMO_PREV -> {
@@ -731,6 +781,10 @@ jobs:
                   const val MIN_LETTER = 16
                   const val MAX_LETTER = 40
                   const val DEF_LETTER = 26
+                  const val KEY_KB = "kb_scale"
+                  const val MIN_KB = 80
+                  const val MAX_KB = 120
+                  const val DEF_KB = 100
                   const val MODE_AUTO = 0
                   const val MODE_PORTRAIT = 1
                   const val MODE_LANDSCAPE = 2
@@ -762,6 +816,15 @@ jobs:
                           .putInt(KEY_LETTER, value.coerceIn(MIN_LETTER, MAX_LETTER)).apply()
                   }
 
+                  fun kbScale(context: Context): Int =
+                      context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                          .getInt(KEY_KB, DEF_KB).coerceIn(MIN_KB, MAX_KB)
+
+                  fun setKbScale(context: Context, value: Int) {
+                      context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                          .putInt(KEY_KB, value.coerceIn(MIN_KB, MAX_KB)).apply()
+                  }
+
                   fun theme(context: Context): Theme = THEMES[themeIndex(context)]
 
                   fun nextTheme(context: Context) {
@@ -772,6 +835,7 @@ jobs:
 
               private lateinit var themeName: TextView
               private lateinit var sizeText: TextView
+              private lateinit var kbText: TextView
               private lateinit var previewBox: LinearLayout
               private lateinit var previewKey: TextView
               private lateinit var previewFn: TextView
@@ -809,6 +873,7 @@ jobs:
                   previewFn.background = keyBg(t.key, t.accent)
                   previewKey.textSize = letterSize(this).toFloat()
                   sizeText.text = "حجم الحروف: " + letterSize(this)
+                  kbText.text = "حجم الكيبورد: " + kbScale(this) + "%"
               }
 
               override fun onCreate(savedInstanceState: Bundle?) {
@@ -894,6 +959,23 @@ jobs:
                   sizeRow.addView(bigger, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
                   sizeRow.addView(smaller, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
                   root.addView(sizeRow)
+
+                  root.addView(makeText("\nحجم الكيبورد كامل:", 18f))
+                  kbText = makeText("", 16f)
+                  root.addView(kbText)
+                  val kbRow = LinearLayout(this)
+                  kbRow.orientation = LinearLayout.HORIZONTAL
+                  val kbBigger = makeButton("تكبير الكيبورد +") {
+                      setKbScale(this, kbScale(this) + 10)
+                      refreshPreview()
+                  }
+                  val kbSmaller = makeButton("تصغير الكيبورد −") {
+                      setKbScale(this, kbScale(this) - 10)
+                      refreshPreview()
+                  }
+                  kbRow.addView(kbBigger, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                  kbRow.addView(kbSmaller, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                  root.addView(kbRow)
                   refreshPreview()
 
                   root.addView(makeText("\n", 12f))
