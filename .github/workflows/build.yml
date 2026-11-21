@@ -74,6 +74,11 @@ jobs:
                           <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
                   </activity>
+                  <activity
+                      android:name=".VoiceActivity"
+                      android:exported="false"
+                      android:excludeFromRecents="true"
+                      android:theme="@android:style/Theme.Translucent.NoTitleBar" />
                   <service
                       android:name=".NokiaImeService"
                       android:label="Nokia Style Keyboard"
@@ -106,6 +111,8 @@ jobs:
 
           import android.content.Intent
           import android.inputmethodservice.InputMethodService
+          import android.os.Handler
+          import android.os.Looper
           import android.view.KeyEvent
           import android.view.View
 
@@ -133,6 +140,17 @@ jobs:
                           NokiaKeyboardView.ACTION_SPACE -> ic.commitText(" ", 1)
                           NokiaKeyboardView.ACTION_LANGUAGE -> keyboardView?.toggleLanguage()
                           NokiaKeyboardView.ACTION_SHIFT -> keyboardView?.toggleShift()
+                          NokiaKeyboardView.ACTION_MIC -> {
+                              VoiceBridge.listener = { text ->
+                                  Handler(Looper.getMainLooper()).postDelayed({
+                                      currentInputConnection?.commitText(text, 1)
+                                  }, 400)
+                              }
+                              val vi = Intent(this, VoiceActivity::class.java)
+                              vi.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                              vi.putExtra("lang", if (keyboardView?.isArabic() == true) "ar-SA" else "en-US")
+                              startActivity(vi)
+                          }
                           NokiaKeyboardView.ACTION_SETTINGS -> {
                               val i = Intent(this, SettingsActivity::class.java)
                               i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -181,6 +199,7 @@ jobs:
                   const val ACTION_LANGUAGE = "__LANGUAGE__"
                   const val ACTION_SHIFT = "__SHIFT__"
                   const val ACTION_SETTINGS = "__SETTINGS__"
+                  const val ACTION_MIC = "__MIC__"
                   private const val ACTION_SYMBOLS = "__SYMBOLS__"
                   private const val ACTION_LETTERS = "__LETTERS__"
                   private const val ACTION_THEME = "__THEME__"
@@ -277,6 +296,7 @@ jobs:
               private fun toolbar(): Row = Row(
                   listOf(
                       Key("⚙", ACTION_SETTINGS, kind = 2),
+                      Key("🎤", ACTION_MIC, kind = 2),
                       Key("◐", ACTION_THEME, kind = 2),
                       Key("📋", ACTION_PASTE, kind = 2),
                       Key("😊", ACTION_EMOJI, kind = 2)
@@ -342,8 +362,9 @@ jobs:
                       Key(if (arabic) "EN" else "ع", ACTION_LANGUAGE, 1.0f, kind = 1),
                       Key("⚙", ACTION_SETTINGS, 0.8f, kind = 1),
                       Key("◐", ACTION_THEME, 0.8f, kind = 1),
+                      Key("🎤", ACTION_MIC, 0.8f, kind = 1),
                       Key("☻", ACTION_EMOJI, 0.8f),
-                      Key(if (arabic) "مسافة" else "space", ACTION_SPACE, 2.9f),
+                      Key(if (arabic) "مسافة" else "space", ACTION_SPACE, 2.1f),
                       Key(if (arabic) "،" else ",", if (arabic) "،" else ",", 0.8f),
                       Key("↵", ACTION_ENTER, 1.0f, kind = 1)
                   )
@@ -375,6 +396,7 @@ jobs:
               fun toggleShift() { shifted = !shifted; invalidate() }
               fun resetShift() { shifted = false; symbols = false; emoji = false; resetMultiTap(); invalidate() }
               fun refreshLayout() { requestLayout(); invalidate() }
+              fun isArabic(): Boolean = arabic
 
               private fun resetMultiTap() {
                   lastT9Digit = ' '
@@ -419,10 +441,12 @@ jobs:
                   (Color.blue(a) + (Color.blue(b) - Color.blue(a)) * t).toInt()
               )
 
-              private fun fitSize(lines: List<String>, maxW: Float, start: Float): Float {
+              private fun fitSize(lines: List<String>, maxW: Float, maxH: Float, start: Float): Float {
                   var size = start
                   paint.textSize = size
-                  while (size > 10f * density && lines.any { paint.measureText(it) > maxW }) {
+                  while (size > 10f * density &&
+                      (lines.any { paint.measureText(it) > maxW } || paint.fontSpacing * lines.size > maxH)
+                  ) {
                       size -= density
                       paint.textSize = size
                   }
@@ -431,11 +455,29 @@ jobs:
 
               private fun drawLetters(canvas: Canvas, r: RectF, letters: String) {
                   val upper = if (shifted && !arabic) letters.uppercase() else letters
-                  // a space between letters keeps every Arabic letter separate (not joined)
-                  val shown = upper.toCharArray().joinToString(" ")
-                  paint.textSize = fitSize(listOf(shown), r.width() - 8f * density, 26f * density)
-                  val baseline = r.centerY() - (paint.ascent() + paint.descent()) / 2
-                  canvas.drawText(shown, r.centerX(), baseline, paint)
+                  val chars = upper.toCharArray().map { it.toString() }
+                  val one = chars.joinToString(" ")
+                  val maxW = r.width() - 8f * density
+                  val maxH = r.height() - 6f * density
+                  val base = SettingsActivity.letterSize(context) * density
+                  paint.textSize = base
+                  var lines = listOf(one)
+                  if (base > 26f * density && chars.size > 2 && paint.measureText(one) > maxW) {
+                      val half = (chars.size + 1) / 2
+                      lines = listOf(chars.take(half).joinToString(" "), chars.drop(half).joinToString(" "))
+                  }
+                  paint.textSize = fitSize(lines, maxW, maxH, base)
+                  if (lines.size == 1) {
+                      val baseline = r.centerY() - (paint.ascent() + paint.descent()) / 2
+                      canvas.drawText(lines[0], r.centerX(), baseline, paint)
+                  } else {
+                      val lh = paint.fontSpacing
+                      var y = r.centerY() - lh * lines.size / 2 - paint.ascent()
+                      for (ln in lines) {
+                          canvas.drawText(ln, r.centerX(), y, paint)
+                          y += lh
+                      }
+                  }
               }
 
               private fun drawLanguageKey(canvas: Canvas, r: RectF, code: String, accent: Int) {
@@ -479,6 +521,7 @@ jobs:
                   canvas.drawColor(th.bg)
                   val t9 = useT9()
                   val tint = if (th.dark) Color.WHITE else Color.BLACK
+                  val keyScale = minOf(SettingsActivity.letterSize(context) / 26f, 1.3f)
                   val keys = keyRects()
                   keys.forEachIndexed { index, (r, key) ->
                       if (key.value == ACTION_NOOP) return@forEachIndexed
@@ -532,7 +575,7 @@ jobs:
                           key.value == ACTION_SPACE -> 18f
                           label.length > 3 -> 16f
                           fn -> 26f
-                          else -> 24f
+                          else -> 24f * keyScale
                       }
                       paint.textSize = size * density
                       val baseline = r.centerY() - (paint.ascent() + paint.descent()) / 2
@@ -609,7 +652,7 @@ jobs:
                           invalidate()
                       }
                       ACTION_PASTE -> paste()
-                      ACTION_SHIFT, ACTION_LANGUAGE, ACTION_BACKSPACE, ACTION_ENTER, ACTION_SPACE, ACTION_SETTINGS -> onKey(v)
+                      ACTION_SHIFT, ACTION_LANGUAGE, ACTION_BACKSPACE, ACTION_ENTER, ACTION_SPACE, ACTION_SETTINGS, ACTION_MIC -> onKey(v)
                       else -> {
                           val upper = shifted && !arabic && v.length == 1 && v[0].isLetter()
                           onKey(if (upper) v.uppercase() else v)
@@ -684,6 +727,10 @@ jobs:
                   const val PREFS = "nokia_prefs"
                   const val KEY_MODE = "layout_mode"
                   const val KEY_THEME = "theme_index"
+                  const val KEY_LETTER = "letter_size"
+                  const val MIN_LETTER = 16
+                  const val MAX_LETTER = 40
+                  const val DEF_LETTER = 26
                   const val MODE_AUTO = 0
                   const val MODE_PORTRAIT = 1
                   const val MODE_LANDSCAPE = 2
@@ -706,6 +753,15 @@ jobs:
                       return if (i in THEMES.indices) i else 0
                   }
 
+                  fun letterSize(context: Context): Int =
+                      context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                          .getInt(KEY_LETTER, DEF_LETTER).coerceIn(MIN_LETTER, MAX_LETTER)
+
+                  fun setLetterSize(context: Context, value: Int) {
+                      context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                          .putInt(KEY_LETTER, value.coerceIn(MIN_LETTER, MAX_LETTER)).apply()
+                  }
+
                   fun theme(context: Context): Theme = THEMES[themeIndex(context)]
 
                   fun nextTheme(context: Context) {
@@ -715,6 +771,7 @@ jobs:
               }
 
               private lateinit var themeName: TextView
+              private lateinit var sizeText: TextView
               private lateinit var previewBox: LinearLayout
               private lateinit var previewKey: TextView
               private lateinit var previewFn: TextView
@@ -750,6 +807,8 @@ jobs:
                   previewKey.background = keyBg(t.key, t.border)
                   previewFn.setTextColor(t.accent)
                   previewFn.background = keyBg(t.key, t.accent)
+                  previewKey.textSize = letterSize(this).toFloat()
+                  sizeText.text = "حجم الحروف: " + letterSize(this)
               }
 
               override fun onCreate(savedInstanceState: Bundle?) {
@@ -818,6 +877,23 @@ jobs:
                       nextTheme(this)
                       refreshPreview()
                   })
+
+                  root.addView(makeText("\nحجم الحروف:", 18f))
+                  sizeText = makeText("", 16f)
+                  root.addView(sizeText)
+                  val sizeRow = LinearLayout(this)
+                  sizeRow.orientation = LinearLayout.HORIZONTAL
+                  val bigger = makeButton("تكبير الحروف +") {
+                      setLetterSize(this, letterSize(this) + 2)
+                      refreshPreview()
+                  }
+                  val smaller = makeButton("تصغير الحروف −") {
+                      setLetterSize(this, letterSize(this) - 2)
+                      refreshPreview()
+                  }
+                  sizeRow.addView(bigger, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                  sizeRow.addView(smaller, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                  root.addView(sizeRow)
                   refreshPreview()
 
                   root.addView(makeText("\n", 12f))
@@ -839,6 +915,54 @@ jobs:
                   val scroll = ScrollView(this)
                   scroll.addView(root)
                   setContentView(scroll)
+              }
+          }
+          EOF_FILE
+          mkdir -p P/app/src/main/java/com/example/nokiakeyboard
+          cat > P/app/src/main/java/com/example/nokiakeyboard/VoiceActivity.kt << 'EOF_FILE'
+          package com.example.nokiakeyboard
+
+          import android.app.Activity
+          import android.content.ActivityNotFoundException
+          import android.content.Intent
+          import android.os.Bundle
+          import android.speech.RecognizerIntent
+          import android.widget.Toast
+
+          object VoiceBridge {
+              var listener: ((String) -> Unit)? = null
+          }
+
+          class VoiceActivity : Activity() {
+
+              private val requestCodeVoice = 77
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  if (savedInstanceState != null) return
+                  val lang = intent.getStringExtra("lang") ?: "ar-SA"
+                  val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                  i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                  i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang)
+                  i.putExtra(RecognizerIntent.EXTRA_PROMPT, "تحدّث الآن")
+                  try {
+                      startActivityForResult(i, requestCodeVoice)
+                  } catch (e: ActivityNotFoundException) {
+                      Toast.makeText(this, "التعرف على الصوت غير متاح على هذا الجهاز", Toast.LENGTH_LONG).show()
+                      finish()
+                  }
+              }
+
+              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+                  super.onActivityResult(requestCode, resultCode, data)
+                  if (requestCode == requestCodeVoice && resultCode == RESULT_OK) {
+                      val list = data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                      val text = list?.firstOrNull()
+                      if (!text.isNullOrEmpty()) {
+                          VoiceBridge.listener?.invoke(text)
+                      }
+                  }
+                  finish()
               }
           }
           EOF_FILE
